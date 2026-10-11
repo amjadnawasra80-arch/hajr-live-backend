@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hajr}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env or the environment}
+      POSTGRES_DB: ${POSTGRES_DB:-hajr_live}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Schema files run once, in alphabetical order, on first initialisation of an empty volume.
+      - ./db:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-hajr}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-hajr_live}?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET (min 16 chars) in .env or the environment}
+      PORT: "8080"
+      MOCK_LOGIN_ENABLED: ${MOCK_LOGIN_ENABLED:-false}
+      WS_ALLOWED_ORIGINS: ${WS_ALLOWED_ORIGINS:-}
+    ports:
+      - "${PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  pgdata:

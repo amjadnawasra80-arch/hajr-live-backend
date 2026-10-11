@@ -400,3 +400,49 @@ TOKEN=$(curl -s -X POST localhost:8080/api/login -d '{"phone_number":"+100000000
 curl -X POST localhost:8080/api/topup -H "Authorization: Bearer $TOKEN" \
   -d '{"user_id":"<USER_UUID>","fiat_amount":999,"fiat_currency":"USD","real_coins_minted":1000,"payment_provider":"stripe","provider_txn_id":"pi_test_001"}'
 ```
+
+---
+
+## 7. Docker Deployment
+
+The repository ships with a multi-stage `Dockerfile` (static Go binary, non-root Alpine runtime) and a `docker-compose.yml` that runs PostgreSQL 16 and the API together.
+
+### Quick start
+
+```bash
+cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
+# Edit .env: set POSTGRES_PASSWORD and JWT_SECRET (e.g. `openssl rand -hex 32`)
+docker compose up -d --build
+```
+
+- The API is available at `http://localhost:8080` (override with `PORT`); check it with `curl http://localhost:8080/health`.
+- PostgreSQL is published on `127.0.0.1:5432` only.
+- `db/*.sql` is mounted into `/docker-entrypoint-initdb.d`, so the schema is applied **once, in order, when the `pgdata` volume is first created**. To re-initialise from scratch: `docker compose down -v` (this deletes all data).
+- `docker compose up` refuses to start if `POSTGRES_PASSWORD` or `JWT_SECRET` is missing. Use a URL-safe `POSTGRES_PASSWORD` (letters/digits), since it is embedded in `DATABASE_URL`.
+
+### Compose environment
+
+| Variable | Default | Description |
+|---|---|---|
+| `POSTGRES_USER` | `hajr` | Database role |
+| `POSTGRES_PASSWORD` | *(required)* | Database password |
+| `POSTGRES_DB` | `hajr_live` | Database name |
+| `JWT_SECRET` | *(required)* | HMAC secret, at least 16 characters |
+| `PORT` | `8080` | Host port for the API |
+| `MOCK_LOGIN_ENABLED` | `false` | Keep `false` outside development |
+| `WS_ALLOWED_ORIGINS` | *(empty)* | Allowed browser origins for `/ws` |
+
+### Useful commands
+
+```bash
+docker compose logs -f api      # follow API logs
+docker compose ps               # service status and health
+docker compose down             # stop (data is kept in the pgdata volume)
+docker build -t hajr-live-backend .   # build the API image only
+```
+
+> The seeded admin and the mock login are development conveniences; review the "Known limitations" in section 5 before exposing this stack publicly.
+
+### CI
+
+`.github/workflows/build.yml` runs `go vet`, `go build` and `go test` on every push and pull request to `main`, then verifies that the Docker image builds.
