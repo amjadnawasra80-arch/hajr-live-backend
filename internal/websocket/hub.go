@@ -52,6 +52,8 @@ func NewHub(allowedOrigins []string) *Hub {
 		broadcast:  make(chan []byte, 256),
 		done:       make(chan struct{}),
 		upgrader: gws.Upgrader{
+			// Echo "bearer" when a browser authenticates via the subprotocol list ["bearer", "<jwt>"].
+			Subprotocols:    []string{"bearer"},
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
 			CheckOrigin: func(r *http.Request) bool {

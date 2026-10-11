@@ -490,15 +490,19 @@ func registerProtectedRoutes(mux *http.ServeMux, am *auth.Manager, hub *ws.Hub) 
 	// 5b. الهدايا: أي مستخدم مسجّل؛ المُرسل دائماً من الـ JWT، ويُبث الحدث عبر WebSocket
 	mux.Handle("POST /api/gift", protect(giftHandler(hub)))
 
+	// 5c. رصيد المحفظة (قراءة فقط) للمستخدم الحالي
+	mux.Handle("GET /api/wallet", protect(walletHandler))
+
 	// 6. محرك البث المباشر (WebSocket)
-	mux.Handle("GET /ws", protect(func(w http.ResponseWriter, r *http.Request) {
+	// Browsers authenticate via the ["bearer", "<jwt>"] subprotocol (see wsSubprotocolAuth).
+	mux.Handle("GET /ws", wsSubprotocolAuth(protect(func(w http.ResponseWriter, r *http.Request) {
 		claims, ok := auth.ClaimsFromContext(r.Context())
 		if !ok {
 			writeError(w, http.StatusUnauthorized, "unauthenticated")
 			return
 		}
 		hub.ServeWS(w, r, claims.UserID)
-	}))
+	})))
 }
 
 // ---------------------------------------------------------------------------
@@ -626,7 +630,7 @@ func main() {
 	addr := ":" + envOr("PORT", "8080")
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           corsMiddleware(strings.Split(os.Getenv("CORS_ALLOWED_ORIGINS"), ","), mux),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,

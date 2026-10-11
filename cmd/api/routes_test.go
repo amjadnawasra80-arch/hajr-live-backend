@@ -104,3 +104,68 @@ func TestGiftRejectsNonUUIDTokenSubject(t *testing.T) {
 		t.Fatalf("got %d, want 401", got)
 	}
 }
+
+func TestWalletRequiresJWT(t *testing.T) {
+	mux, _ := newTestMux(t)
+	if got := do(mux, http.MethodGet, "/api/wallet", "", "").Code; got != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", got)
+	}
+}
+
+func TestWSSubprotocolAuth(t *testing.T) {
+	mux, am := newTestMux(t)
+	tok, _, _ := am.GenerateToken(testUser, "+10000000001", false)
+
+	// No credentials at all -> 401.
+	if got := do(mux, http.MethodGet, "/ws", "", "").Code; got != http.StatusUnauthorized {
+		t.Fatalf("no creds: got %d, want 401", got)
+	}
+	// Garbage token in the subprotocol -> 401.
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Header.Set("Sec-WebSocket-Protocol", "bearer, garbage")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("bad subprotocol token: got %d, want 401", rec.Code)
+	}
+	// Valid token in the subprotocol passes auth (the upgrade itself then fails with 400
+	// because this is not a real WebSocket handshake, which proves auth succeeded).
+	req = httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Header.Set("Sec-WebSocket-Protocol", "bearer, "+tok)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
+		t.Fatalf("valid subprotocol token rejected: %d", rec.Code)
+	}
+}
+
+func TestCORS(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	// Disabled when the allow-list is empty.
+	h := corsMiddleware([]string{""}, inner)
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Header.Set("Origin", "http://evil.example")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatal("CORS headers must not be set when disabled")
+	}
+
+	h = corsMiddleware([]string{"http://localhost:3000"}, inner)
+	for origin, want := range map[string]string{
+		"http://localhost:3000": "http://localhost:3000",
+		"http://evil.example":   "",
+	} {
+		req := httptest.NewRequest(http.MethodOptions, "/api/gift", nil)
+		req.Header.Set("Origin", origin)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != want {
+			t.Errorf("origin %q: got %q, want %q", origin, got, want)
+		}
+		if rec.Code != http.StatusNoContent {
+			t.Errorf("preflight status %d, want 204", rec.Code)
+		}
+	}
+}

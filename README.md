@@ -143,6 +143,7 @@ Request bodies are limited to 1 MiB and **unknown JSON fields are rejected**.
 | POST | `/api/grant` | Admin |
 | POST | `/api/chargeback` | Admin |
 | POST | `/api/gift` | Any logged-in user |
+| GET | `/api/wallet` | Any logged-in user |
 | GET | `/ws` | Any logged-in user |
 
 ### `GET /health`
@@ -319,7 +320,17 @@ Upgrade: websocket
 { "type": "chat", "from": "<sender user_id>", "data": { "text": "hello" }, "ts": "2026-10-12T00:50:00Z" }
 ```
 
-`from` is set by the server from the JWT and cannot be spoofed. Unsupported or malformed frames get a private `{"type":"error", ...}` reply. Browsers cannot set the `Authorization` header on a WebSocket, so this endpoint is aimed at mobile/native clients; a web client would need a short-lived ticket mechanism.
+`from` is set by the server from the JWT and cannot be spoofed. Unsupported or malformed frames get a private `{"type":"error", ...}` reply. Browsers cannot set the `Authorization` header on a WebSocket, so the JWT can alternatively be sent in the subprotocol list `["bearer", "<jwt>"]` (`Sec-WebSocket-Protocol: bearer, <jwt>`). The token is validated by the same middleware and never appears in the URL. The Flutter app uses this on every platform.
+
+### `GET /api/wallet` — Any logged-in user
+
+Read-only. Returns the caller's own balances (the user always comes from the JWT).
+
+```json
+{ "success": true, "user_id": "<uuid>", "is_admin": false, "real_coins": 1000, "promo_coins": 500, "updated_at": "2026-10-12T00:50:00Z" }
+```
+
+Status codes: `200`, `401`, `404` (no wallet).
 
 ---
 
@@ -338,7 +349,7 @@ Upgrade: websocket
 | Group | Middleware | Routes | Failure |
 |---|---|---|---|
 | Public | none | `/health`, `/api/users/create`, `/api/login` | — |
-| Protected | `Manager.Middleware` | `/api/gift`, `/ws` | 401 |
+| Protected | `Manager.Middleware` | `/api/gift`, `/api/wallet`, `/ws` | 401 |
 | Admin | `Manager.AdminMiddleware` | `/api/topup`, `/api/grant`, `/api/chargeback` | 401 / **403** |
 
 ### God Mode admin
@@ -394,6 +405,7 @@ cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
 | `PORT` | no | HTTP port, default `8080` |
 | `MOCK_LOGIN_ENABLED` | no | `true` enables the mock `/api/login` (**development only**) |
 | `WS_ALLOWED_ORIGINS` | no | Comma-separated browser origins allowed to open `/ws` (empty = same-origin only; non-browser clients are unaffected) |
+| `CORS_ALLOWED_ORIGINS` | no | Comma-separated browser origins allowed to call the REST API cross-origin (empty = CORS disabled) |
 
 Real process environment variables take priority over `.env`. **Never commit `.env`.**
 
@@ -450,7 +462,7 @@ curl -X POST localhost:8080/api/topup -H "Authorization: Bearer $TOKEN" \
 
 ## 7. Docker Deployment
 
-The repository ships with a multi-stage `Dockerfile` (static Go binary, non-root Alpine runtime) and a `docker-compose.yml` that runs PostgreSQL 16 and the API together.
+The repository ships with two multi-stage Dockerfiles — `Dockerfile` (static Go binary, non-root Alpine runtime) and `frontend/Dockerfile` (Flutter web build served by nginx) — and a `docker-compose.yml` that runs the whole platform: **PostgreSQL 16 + Go API + Flutter web**.
 
 ### Quick start
 
@@ -460,7 +472,9 @@ cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
 docker compose up -d --build
 ```
 
-- The API is available at `http://localhost:8080` (override with `PORT`); check it with `curl http://localhost:8080/health`.
+- **Web app:** `http://localhost:3000` (override with `WEB_PORT`). nginx serves the Flutter build and proxies `/api`, `/health` and `/ws` to the API, so the browser only ever talks to one origin (no CORS needed).
+- The API is also available directly at `http://localhost:8080` (override with `PORT`); check it with `curl http://localhost:8080/health`.
+- To sign in you need an existing user and `MOCK_LOGIN_ENABLED=true` (development only). The schema seeds admin user #1 with phone `+10000000000`.
 - PostgreSQL is published on `127.0.0.1:5432` only.
 - `db/*.sql` is mounted into `/docker-entrypoint-initdb.d`, so the schema is applied **once, in order, when the `pgdata` volume is first created**. To re-initialise from scratch: `docker compose down -v` (this deletes all data).
 - `docker compose up` refuses to start if `POSTGRES_PASSWORD` or `JWT_SECRET` is missing. Use a URL-safe `POSTGRES_PASSWORD` (letters/digits), since it is embedded in `DATABASE_URL`.
@@ -474,6 +488,8 @@ docker compose up -d --build
 | `POSTGRES_DB` | `hajr_live` | Database name |
 | `JWT_SECRET` | *(required)* | HMAC secret, at least 16 characters |
 | `PORT` | `8080` | Host port for the API |
+| `WEB_PORT` | `3000` | Host port for the web app |
+| `CORS_ALLOWED_ORIGINS` | *(empty)* | Cross-origin allow-list for the REST API (not needed with the bundled nginx) |
 | `MOCK_LOGIN_ENABLED` | `false` | Keep `false` outside development |
 | `WS_ALLOWED_ORIGINS` | *(empty)* | Allowed browser origins for `/ws` |
 
@@ -484,10 +500,60 @@ docker compose logs -f api      # follow API logs
 docker compose ps               # service status and health
 docker compose down             # stop (data is kept in the pgdata volume)
 docker build -t hajr-live-backend .   # build the API image only
+docker build -t hajr-live-web ./frontend   # build the web image only
 ```
 
 > The seeded admin and the mock login are development conveniences; review the "Known limitations" in section 5 before exposing this stack publicly.
 
 ### CI
 
-`.github/workflows/build.yml` runs `go vet`, `go build` and `go test` on every push and pull request to `main`, then verifies that the Docker image builds.
+`.github/workflows/build.yml` runs `go vet`, `go build` and `go test` on every push and pull request to `main`, runs `flutter analyze`, `flutter test` and `flutter build web` for the frontend, then verifies that the API Docker image builds.
+
+---
+
+## 8. Frontend (Flutter: Android, iOS, Web)
+
+The app lives in `frontend/` (package `hajr_live`) and talks to the Go API over REST and WebSocket.
+
+```
+frontend/lib/main.dart                       App entry, session-driven routing (login <-> app)
+frontend/lib/config.dart                     API base URL (--dart-define=API_BASE_URL) and ws:// URL
+frontend/lib/models.dart                     Session, Wallet, LiveEvent (chat / gift / system), helpers
+frontend/lib/services/api_client.dart        Typed REST client: login, wallet, gift, top-up
+frontend/lib/services/live_socket.dart       WebSocket with JWT subprotocol auth + auto-reconnect
+frontend/lib/services/session_store.dart     JWT persistence (flutter_secure_storage), login/logout
+frontend/lib/app_shell.dart                  Bottom navigation, owns the single WebSocket connection
+frontend/lib/screens/login_screen.dart       Phone-number sign-in (saves the JWT)
+frontend/lib/screens/live_room_screen.dart   Live chat, gift sheet, animated gift banners
+frontend/lib/screens/wallet_screen.dart      Balances (real / promo) and admin top-up
+```
+
+### Screens
+
+| Screen | What it does |
+|---|---|
+| Login | Validates an E.164 phone number, calls `POST /api/login`, stores the JWT securely, restores the session on restart and signs out automatically on a `401`. |
+| Live room | Connects to `/ws`, shows real-time chat, and sends gifts through `POST /api/gift` (promo/real coins, preset or custom amount, idempotency key reused on retries). Every `gift` event from the hub plays an animated banner. |
+| Wallet | Shows `GET /api/wallet` balances (pull to refresh, auto-refresh after gifts) and triggers `POST /api/topup`. Top-up is an **admin-only** endpoint on the backend, so the buttons are enabled for admin accounts only. |
+
+### Run in development
+
+Start the stack (or just the database and API), then:
+
+```bash
+cd frontend
+flutter pub get
+
+# Web (the API must allow this origin: set CORS_ALLOWED_ORIGINS=http://localhost:5555 on the API)
+flutter run -d chrome --web-port 5555 --dart-define=API_BASE_URL=http://localhost:8080
+
+# Android emulator (the host machine is 10.0.2.2); use your LAN IP for a real device
+flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8080
+
+# iOS simulator
+flutter run --dart-define=API_BASE_URL=http://localhost:8080
+```
+
+Checks: `flutter analyze` and `flutter test`. Production web build: `flutter build web --dart-define=API_BASE_URL=origin`.
+
+> Plain `http://`/`ws://` is fine for local development. In production serve everything over **HTTPS/WSS** (the app derives `wss://` from an `https://` base URL), because release builds block cleartext traffic (Android: only debug builds allow it; iOS: only local networking is exempt).
