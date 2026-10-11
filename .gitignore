@@ -1,0 +1,19 @@
+# Secrets / local environment (never commit)
+.env
+.env.*
+!.env.example
+
+# Go build artifacts
+*.exe
+*.test
+*.out
+/bin/
+
+# Logs
+*.log
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,6 @@
+# HAJR LIVE V12 - Master Architecture Directives
+- Database: PostgreSQL 13+ (Strict ACID).
+- Currency: BIGINT exclusively (minor units).
+- Dual-Ledger: `real_coins` (purchased) and `promo_coins` (free).
+- Negative Balances: Strictly forbidden, EXCEPT for the `chargeback_ledger`.
+- Immutability: All ledgers are APPEND-ONLY (No UPDATE/DELETE/TRUNCATE).
