@@ -487,6 +487,9 @@ func registerAdminRoutes(mux *http.ServeMux, am *auth.Manager) {
 func registerProtectedRoutes(mux *http.ServeMux, am *auth.Manager, hub *ws.Hub) {
 	protect := func(h http.HandlerFunc) http.Handler { return am.Middleware(h) }
 
+	// 5b. الهدايا: أي مستخدم مسجّل؛ المُرسل دائماً من الـ JWT، ويُبث الحدث عبر WebSocket
+	mux.Handle("POST /api/gift", protect(giftHandler(hub)))
+
 	// 6. محرك البث المباشر (WebSocket)
 	mux.Handle("GET /ws", protect(func(w http.ResponseWriter, r *http.Request) {
 		claims, ok := auth.ClaimsFromContext(r.Context())

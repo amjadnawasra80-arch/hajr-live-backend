@@ -41,6 +41,7 @@ Core directives (also enforced in `.cursorrules`):
 
 ```
 cmd/api/main.go                 Entry point: routing, handlers, middleware wiring, graceful shutdown
+cmd/api/gift.go                 POST /api/gift handler (JWT sender, idempotent, WebSocket broadcast)
 internal/database/postgres.go   .env loading (godotenv) + pgxpool connection (global `database.Pool`)
 internal/auth/jwt.go            JWT generation / validation (HS256) and claims-in-context helpers
 internal/auth/middleware.go     Middleware (any valid JWT) and AdminMiddleware (is_admin = true)
@@ -89,7 +90,7 @@ All balance changes flow through ledger tables. **The Go code never updates `wal
 | `chargeback_ledger` | Fraud/chargeback deductions | `− real_coins` (may go negative = debt) |
 | `transactions` | Gifts between users | 25 % platform fee (integer math), same coin type end-to-end |
 
-> The `transactions` (gifting) ledger and its trigger exist in `db/001_core_schema.sql`; no HTTP endpoint exposes it yet. The WebSocket hub is designed to broadcast gift events once that endpoint is added.
+> The `transactions` (gifting) ledger and its trigger live in `db/001_core_schema.sql` and are exposed through `POST /api/gift`, which also broadcasts a `gift` event to the WebSocket hub.
 
 ### Triggers
 
@@ -120,6 +121,7 @@ The API handles this for you:
 |---|---|
 | `/api/topup` | `Idempotency-Key` header, else derived from `payment_provider` + `provider_txn_id` |
 | `/api/chargeback` | `Idempotency-Key` header, else derived from `user_id` + `provider_txn_id` |
+| `/api/gift` | `Idempotency-Key` header, else a **random** key (send the header to make retries safe) |
 | `/api/grant` | `Idempotency-Key` header, else a **random** key (grants have no natural unique key — send the header to make retries safe) |
 
 A replay returns `200` with `"replayed": true` and the original record; a first insert returns `201`.
@@ -140,6 +142,7 @@ Request bodies are limited to 1 MiB and **unknown JSON fields are rejected**.
 | POST | `/api/topup` | Admin |
 | POST | `/api/grant` | Admin |
 | POST | `/api/chargeback` | Admin |
+| POST | `/api/gift` | Any logged-in user |
 | GET | `/ws` | Any logged-in user |
 
 ### `GET /health`
@@ -252,6 +255,48 @@ Each endpoint also echoes its amount field(s): `real_coins`, `promo_coins` + `re
 | Database timeout (5 s per call) | 504 |
 | Anything else (details logged server-side only) | 500 |
 
+### `POST /api/gift` — Any logged-in user
+
+Sends coins from the authenticated user to another user. Requires `Authorization: Bearer <jwt>`. The **sender is always the user in the token**; a `sender_id` field in the body is rejected as an unknown field.
+
+```json
+{
+  "receiver_id": "<uuid>",
+  "coin_type": "real_coins",
+  "amount": 100
+}
+```
+
+- `coin_type` is `real_coins` or `promo_coins`. Coins keep their type end-to-end, so free coins can never become purchased coins.
+- `amount` is in minor units, between 1 and 1,000,000,000. Self-gifting is rejected.
+- The database trigger locks both wallets, verifies the sender's balance for that coin type, and applies the 25 % platform fee (integer math, truncated). The receiver gets `amount - platform_fee`.
+- Send an `Idempotency-Key` header (UUID) so a retry can never charge twice. A replay returns `200` with `"replayed": true` and the original record, moves no money, and does **not** broadcast again. Reusing a key for a different request returns `409`.
+- On a first successful insert (`201`), a `gift` event is broadcast to every WebSocket client.
+
+```json
+{
+  "success": true,
+  "replayed": false,
+  "transaction_id": "<uuid>",
+  "idempotency_key": "<uuid>",
+  "sender_id": "<uuid>",
+  "receiver_id": "<uuid>",
+  "coin_type": "real_coins",
+  "gross_amount": 100,
+  "platform_fee": 25,
+  "net_amount": 75,
+  "created_at": "2026-10-12T00:50:00Z"
+}
+```
+
+Status codes: `201`, `200` (replay), `400` (validation), `401`, `404` (unknown receiver), `409` (key reuse), `422` (insufficient funds), `504`.
+
+WebSocket broadcast (`from` = sender user_id, set by the server):
+
+```json
+{ "type": "gift", "from": "<sender>", "data": { "transaction_id": "<uuid>", "receiver_id": "<uuid>", "coin_type": "real_coins", "amount": 100, "net_amount": 75 }, "ts": "2026-10-12T00:50:00Z" }
+```
+
 ### `GET /ws` — WebSocket
 
 Requires `Authorization: Bearer <jwt>` on the upgrade request.
@@ -293,7 +338,7 @@ Upgrade: websocket
 | Group | Middleware | Routes | Failure |
 |---|---|---|---|
 | Public | none | `/health`, `/api/users/create`, `/api/login` | — |
-| Protected | `Manager.Middleware` | `/ws` | 401 |
+| Protected | `Manager.Middleware` | `/api/gift`, `/ws` | 401 |
 | Admin | `Manager.AdminMiddleware` | `/api/topup`, `/api/grant`, `/api/chargeback` | 401 / **403** |
 
 ### God Mode admin

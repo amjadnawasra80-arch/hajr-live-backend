@@ -106,7 +106,8 @@ func (c *Client) readPump() {
 			if err := c.hub.BroadcastEvent("chat", c.userID, in.Data); err != nil {
 				c.reply("error", "could not process message")
 			}
-		// Future: case "gift": call the ledger layer first, then broadcast on success.
+		// Gifts are NOT accepted over the socket: they go through POST /api/gift,
+		// which writes the ledger first and then broadcasts a "gift" event.
 		default:
 			c.reply("error", "unsupported message type")
 		}
